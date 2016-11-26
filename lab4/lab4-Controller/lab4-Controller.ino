@@ -7,7 +7,7 @@
 #define BUS_LED   4
 #define BUTTON    5
 
-#define TL_SIZE 2 /* we have two traffic light */
+#define TL_SIZE  2 /* we have two traffic light */
 #define TL1_ADDR 8
 #define TL2_ADDR 9
 
@@ -68,7 +68,7 @@ void loop() {
 
 void do_check_state() {
   button_state = digitalRead(BUTTON);
-  delay(50); // stable the read
+  delay(10); // stable the read
   if (button_state != button_state_old) {
     if (button_state == HIGH)
       controller_state = 1;
@@ -94,7 +94,7 @@ void send_data(int slave_add) {
     Serial.println(err);
   }
   digitalWrite(BUS_LED, LOW);
-  delay(100); // to process request
+  delay(50); // to process request
 }
 
 
@@ -109,7 +109,7 @@ void broadcast_data() {
     printByteArrayAsString(data_out);
   }
   digitalWrite(BUS_LED, LOW);
-  delay(100); // to process request
+  delay(50); // to process request
 }
 
 
@@ -160,6 +160,11 @@ void map_tl_ping(int sa, int rid) {
 }
 
 
+int check_tl_dead() {
+  /* if tl is dead 2 cycles then begin shutdown */
+}
+
+
 void proccess_receive() {
   int i = 0;
   if (DEBUG)
@@ -176,13 +181,15 @@ void proccess_receive() {
   }
 }
 
+
 void do_verify_command() {
   if (DEBUG)
     Serial.print("do_verify_command: ");
 
   /* verify what type of command received:
-      ACK x
-      RED x
+      PING x -> send ACK
+      ACK x  -> this is handled in make_ping
+      RED x  -> then adapt to something ?
   */
 
   memset(data_in, 0, MAX_BUFFER); /* clean in the end */
@@ -311,7 +318,7 @@ void make_ack_msg() {
 }
 
 void printByteArrayAsString(byte* data) {
-  if (DEBUG) {
+  if (DEBUG) { /* double check, better safe than sorry */
     for (int i = 0; i < MAX_BUFFER; i++) {
       Serial.print(data[i]);
       Serial.print(" | ");
