@@ -5,7 +5,7 @@
 #define RED_LED   2 /* off state */
 #define GREEN_LED 3 /* on state */
 #define BUS_LED   4
-#define BUTTON    5
+#define BUTTON_SW 5
 
 #define TL_SIZE  2 /* we have two traffic light */
 #define TL1_ADDR 8
@@ -13,6 +13,7 @@
 
 #define MIN_TIME 4000
 #define MAX_TIME 10000
+#define MY_DIVISION (255.0 / 1023.0)
 
 #define MAX_BUFFER 8
 byte data_out[MAX_BUFFER]; /* buffer to send data to slaves */
@@ -24,11 +25,15 @@ unsigned int nok_TL1; /* counter to count cycles of TL1 is nok */
 unsigned int nok_TL2; /* counter to count cycles of TL2 is nok */
 
 int button_state;
-int button_state_old;
+int lastButtonState = HIGH;
+unsigned long lastDebounceTime = 0;
+unsigned long debounceDelay = 50;
 
 int controller_state = 0; /* 0-OFF, 1-ON */
 
+#define POT_ERROR 5
 const int potPin = A0;
+int last_pot;
 
 void setup() {
   pinMode(LED_BUILTIN, OUTPUT);
@@ -43,12 +48,15 @@ void setup() {
   digitalWrite(GREEN_LED, LOW);
   pinMode(BUS_LED, OUTPUT);
   digitalWrite(BUS_LED, LOW);
-  pinMode(BUTTON, INPUT);
+  pinMode(BUTTON_SW, INPUT_PULLUP);
 
   memset(data_out, 0, MAX_BUFFER);
   memset(data_in, 0, MAX_BUFFER);
   memset(buff_ping, 0, MAX_BUFFER);
   memset(ping_res, 0, TL_SIZE);
+
+  if (DEBUG)
+    Serial.println("Starting TLs");
 
   /* start the traffic lights */
   make_off_msg();
@@ -62,22 +70,53 @@ void setup() {
 void loop() {
   do_check_state();
 
-  /* the magic happens here */
 }
 
 
 void do_check_state() {
-  button_state = digitalRead(BUTTON);
+  button_state = digitalRead(BUTTON_SW);
   delay(10); // stable the read
-  if (button_state != button_state_old) {
-    if (button_state == HIGH)
-      controller_state = 1;
-    else
-      controller_state = 0;
+  // improve the read
+  if (button_state == LOW) {
+    controller_state = !controller_state;
+    while (digitalRead(BUTTON_SW) != HIGH); // until released
+    Serial.print("do_check_state: ");
+    Serial.println(controller_state);
   }
 }
 
+/* TO TEST */
+void do_check_state_debounce() {
+  int reading = digitalRead(BUTTON_SW);
 
+  if (reading != lastButtonState)
+    lastDebounceTime = millis();
+
+  if ((millis() - lastDebounceTime) > debounceDelay) {
+    if (reading != lastButtonState) {
+      lastButtonState = reading;
+
+      if (reading == LOW)
+        controller_state = !controller_state;
+    }
+  }
+}
+
+void do_execute_pot() {
+  int val = analogRead(potPin); // the value
+
+  if ((val - last_pot > POT_ERROR) || (last_pot - val > POT_ERROR)) {
+
+    make_time_msg(getAnalogMap(val));
+    //make_time_msg_mapped(getSimpleAnalogMap(val));
+
+    broadcast_data();
+    delay(10); // to process
+  }
+}
+
+/* ------------------------------------------------------------------- */
+/* I2C auxiliary functions down here */
 void send_data(int slave_add) {
   digitalWrite(BUS_LED, HIGH);
   Wire.beginTransmission(slave_add); // transmit to device SLAVE_ADDR
@@ -97,7 +136,6 @@ void send_data(int slave_add) {
   delay(50); // to process request
 }
 
-
 void broadcast_data() {
   digitalWrite(BUS_LED, HIGH);
   Wire.beginTransmission(0);  // broadcast to all
@@ -111,7 +149,6 @@ void broadcast_data() {
   digitalWrite(BUS_LED, LOW);
   delay(50); // to process request
 }
-
 
 void make_ping(int slave_add) {
   int i = 0;
@@ -141,7 +178,24 @@ void make_ping(int slave_add) {
   }
 }
 
+void proccess_receive() {
+  int i = 0;
+  if (DEBUG)
+    Serial.print("proccess_received: ");
 
+  if (Wire.available()) {
+    while (Wire.available()) { // slave may send less than requested
+      data_in[i++] = Wire.read(); // receive a byte each
+    }
+    do_verify_command();
+
+    if (DEBUG)
+      printByteArrayAsString(data_in);
+  }
+}
+
+
+/* ------------------------------------------------------------------- */
 void map_tl_ping(int sa, int rid) {
   switch (sa) {
     case TL1_ADDR:
@@ -160,28 +214,13 @@ void map_tl_ping(int sa, int rid) {
 }
 
 
+/* ------------------------------------------------------------------- */
 int check_tl_dead() {
   /* if tl is dead 2 cycles then begin shutdown */
 }
 
 
-void proccess_receive() {
-  int i = 0;
-  if (DEBUG)
-    Serial.print("proccess_received: ");
-
-  if (Wire.available()) {
-    while (Wire.available()) { // slave may send less than requested
-      data_in[i++] = Wire.read(); // receive a byte each
-    }
-    do_verify_command();
-
-    if (DEBUG)
-      printByteArrayAsString(data_in);
-  }
-}
-
-
+/* ------------------------------------------------------------------- */
 void do_verify_command() {
   if (DEBUG)
     Serial.print("do_verify_command: ");
@@ -196,7 +235,8 @@ void do_verify_command() {
 }
 
 
-int extract_ping_id(byte* s, int s_size) {
+/* ------------------------------------------------------------------- */
+int extract_ping_id(byte * s, int s_size) {
   int res = -1;
   if (DEBUG)
     Serial.print("extract_traffic_id: ");
@@ -223,8 +263,7 @@ int extract_ping_id(byte* s, int s_size) {
   return res;
 }
 
-
-int extract_ack_id(byte* s, int s_size) {
+int extract_ack_id(byte * s, int s_size) {
   int res = -1;
   if (DEBUG)
     Serial.print("extract_ack_id: ");
@@ -251,8 +290,7 @@ int extract_ack_id(byte* s, int s_size) {
   return res;
 }
 
-
-int extract_red_id(byte* s, int s_size) {
+int extract_red_id(byte * s, int s_size) {
   int res = -1;
   if (DEBUG)
     Serial.print("extract_red_id: ");
@@ -280,7 +318,8 @@ int extract_red_id(byte* s, int s_size) {
 }
 
 
-/* message creation area down here */
+/* ------------------------------------------------------------------- */
+/* message creation area down here                         */
 void make_on_msg(int id) {
   memset(data_out, 0, MAX_BUFFER);
   data_out[0] = 'O';
@@ -301,7 +340,17 @@ void make_time_msg(int time_ms) {
   data_out[2] = 'M';
   data_out[3] = 'E';
   data_out[4] = ' ';
-  /* put time in milliseconds */
+  data_out[5] = lowByte(time_ms);
+  data_out[6] = highByte(time_ms);
+}
+void make_time_msg_mapped(byte time_ms) {
+  memset(data_out, 0, MAX_BUFFER);
+  data_out[0] = 'T';
+  data_out[1] = 'I';
+  data_out[2] = 'M';
+  data_out[3] = 'E';
+  data_out[4] = ' ';
+  data_out[5] = time_ms; /* time is converted [0-255], then TL must convert  */
 }
 void make_ping_msg() {
   memset(data_out, 0, MAX_BUFFER);
@@ -317,7 +366,9 @@ void make_ack_msg() {
   data_out[2] = 'K';
 }
 
-void printByteArrayAsString(byte* data) {
+
+/* ------------------------------------------------------------------- */
+void printByteArrayAsString(byte * data) {
   if (DEBUG) { /* double check, better safe than sorry */
     for (int i = 0; i < MAX_BUFFER; i++) {
       Serial.print(data[i]);
@@ -325,4 +376,13 @@ void printByteArrayAsString(byte* data) {
     }
     Serial.println();
   }
+}
+
+// Simple map function between range [0-255]
+int getSimpleAnalogMap(int value) {
+  return (MY_DIVISION * value); // use float calculation with *.0
+}
+// map function between range [MIN_TIME-MAX_TIME]
+int getAnalogMap(int value) {
+  return map(value, 0, 1023, MIN_TIME, MAX_TIME);
 }
