@@ -31,6 +31,7 @@ unsigned long lastDebounceTime = 0;
 unsigned long debounceDelay = 50;
 
 int controller_state = 0; /* 0-OFF, 1-ON */
+int internal = 1;
 
 #define POT_ERROR 5
 const int potPin = A0;
@@ -83,18 +84,34 @@ void loop() {
 
     /* ON */
   } else {
-
+    if (internal) {
+      make_off_msg();
+      send_data(TL1_ADDR, &wait_tl1);
+      send_data(TL2_ADDR, &wait_tl2);
+      digitalWrite(RED_LED, HIGH);
+      digitalWrite(GREEN_LED, LOW);
+      internal = 0; // no need to repeat
+    }
   }
 
 }
 
 
+/* -------------------------------------------------------------------------------------- */
+void set_off() {
+  controller_state = 0;
+  internal = 1;
+}
+
+
+/* -------------------------------------------------------------------------------------- */
 void check_state() {
   button_state = digitalRead(BUTTON_SW);
   delay(10); // stable the read
   // improve the read
   if (button_state == LOW) {
     controller_state = !controller_state;
+    internal = 1;
     while (digitalRead(BUTTON_SW) != HIGH); // until released
     Serial.print("check_state: ");
     Serial.println(controller_state);
@@ -112,8 +129,12 @@ void check_state_debounce() {
     if (reading != lastButtonState) {
       lastButtonState = reading;
 
-      if (reading == LOW)
+      if (reading == LOW) {
         controller_state = !controller_state;
+        internal = 1;
+        Serial.print("check_state: ");
+        Serial.println(controller_state);
+      }
     }
   }
 }
@@ -150,7 +171,7 @@ void send_data(int slave_add, int* to_inc) {
     // Worry later!
   }
   if (DEBUG) {
-    Serial.print("Sended: |");
+    Serial.print("Sent: |");
     printByteArrayAsString(data_out);
     Serial.print("| Return call: ");
     Serial.println(err);
@@ -232,6 +253,12 @@ void map_tl_ping(int sa, int rid) {
           ping_res[0] = 0;
         }
       }
+      if (DEBUG) {
+        Serial.print("map_tl_ping | TL1 | ");
+        Serial.print(ping_res[0]);
+        Serial.print("|");
+        Serial.println(wait_tl1);
+      }
       break;
     case TL2_ADDR:
       if (rid == -1)
@@ -242,6 +269,12 @@ void map_tl_ping(int sa, int rid) {
           wait_tl2 = 0;
           ping_res[1] = 0;
         }
+      }
+      if (DEBUG) {
+        Serial.print("map_tl_ping | TL2 | ");
+        Serial.print(ping_res[1]);
+        Serial.print("|");
+        Serial.println(wait_tl1);
       }
       break;
     default:
@@ -255,11 +288,8 @@ int check_tl_dead() {
   /* if tl is dead 2 cycles then begin shutdown */
   if ((ping_res[0] >= 2) || (ping_res[1] >= 2)) {
     if (DEBUG)
-      Serial.print("HAVE ONE TL DEAD: ");
-    make_off_msg();
-    send_data(TL1_ADDR, &wait_tl1);
-    send_data(TL2_ADDR, &wait_tl2);
-    controller_state = 0;
+      Serial.println("HAVE ONE TL DEAD");
+    set_off();
   }
 }
 
@@ -267,7 +297,7 @@ int check_tl_dead() {
 /* -------------------------------------------------------------------------------------- */
 void check_cycles() {
   if (DEBUG)
-    Serial.print("check_cycles: ");
+    Serial.print("check_cycles | ");
 
   unsigned long currentMillis = millis();
 
@@ -275,10 +305,16 @@ void check_cycles() {
     previousMillis = currentMillis;  // save the last time of cycle
 
     // do we need to ping ?
-    if (ping_res[0] > 0)
+    if (ping_res[0] > 0) {
+      if (DEBUG)
+        Serial.print("TL1 | ");
       make_ping(TL1_ADDR);
-    if (ping_res[1] > 0)
+    }
+    if (ping_res[1] > 0) {
+      if (DEBUG)
+        Serial.print("TL2 | ");
       make_ping(TL2_ADDR);
+    }
   }
 }
 
@@ -286,11 +322,11 @@ void check_cycles() {
 /* -------------------------------------------------------------------------------------- */
 void verify_command(byte * s, int s_size) {
   if (DEBUG)
-    Serial.print("verify_command: ");
+    Serial.print("verify_command | ");
   /* verify what type of command received:
-      PING x -> send ACK
-      ACK x  -> this is handled in make_ping
-      RED x  -> then adapt to something ?
+    PING x -> send ACK
+    ACK x  -> this is handled in make_ping
+    RED x  -> then adapt to something ?
   */
   int id = extract_ping_id(s, s_size);
   if (id != -1) {
@@ -327,6 +363,7 @@ void verify_command(byte * s, int s_size) {
   }
   if (DEBUG)
     Serial.println(id);
+
   memset(data_in, 0, MAX_BUFFER); /* clean in the end */
 }
 
@@ -336,7 +373,11 @@ int extract_ping_id(byte * s, int s_size) {
   int res = -1;
   if (DEBUG)
     Serial.print("extract_ping_id: ");
-
+  /*
+    PING occupies 6 (PING X), buffer has space for 8. if
+    (i + 5) <= s_size, then we won't be able to
+    extract a ping command from the buffer
+  */
   for (int i = 0; i < s_size; i++) {
 
     // the first we want
@@ -346,10 +387,9 @@ int extract_ping_id(byte * s, int s_size) {
       if ((i + 5) <= s_size) {
 
         // aren the others really there ?
-        if ( (s[i + 1] == 'I') && (s[i + 2] == 'N') && (s[i + 3] == 'G') ) {
+        if ( (s[i + 1] == 'I') && (s[i + 2] == 'N') && (s[i + 3] == 'G') && (s[i + 4] == ' ') ) {
 
-          // safe to extract
-          res = s[i + 5];
+          res = s[i + 5]; // safe to extract
         }
       }
     }
@@ -363,7 +403,11 @@ int extract_ack_id(byte * s, int s_size) {
   int res = -1;
   if (DEBUG)
     Serial.print("extract_ack_id: ");
-
+  /*
+    ACK occupies 5 (ACK X), buffer has space for 8. if
+    (i + 4) <= s_size, then we won't be able to
+    extract an ack command from the buffer
+  */
   for (int i = 0; i < s_size; i++) {
 
     // the first we want
@@ -373,10 +417,9 @@ int extract_ack_id(byte * s, int s_size) {
       if ((i + 4) <= s_size) {
 
         // aren the others really there ?
-        if ( (s[i + 1] == 'C') && (s[i + 2] == 'K') ) {
+        if ( (s[i + 1] == 'C') && (s[i + 2] == 'K') && (s[i + 3] == ' ') ) {
 
-          // safe to extract
-          res = s[i + 4];
+          res = s[i + 4]; // safe to extract
         }
       }
     }
@@ -390,7 +433,11 @@ int extract_red_id(byte * s, int s_size) {
   int res = -1;
   if (DEBUG)
     Serial.print("extract_red_id: ");
-
+  /*
+    RED occupies 5 (RED X), buffer has space for 8. if
+    i(i + 4) <= s_size, then we won't be able to
+    extract an ack command from the buffer
+  */
   for (int i = 0; i < s_size; i++) {
 
     // the first we want
@@ -400,10 +447,9 @@ int extract_red_id(byte * s, int s_size) {
       if ((i + 4) <= s_size) {
 
         // aren the others really there ?
-        if ( (s[i + 1] == 'E') && (s[i + 2] == 'D') ) {
+        if ( (s[i + 1] == 'E') && (s[i + 2] == 'D') && (s[i + 3] == ' ') ) {
 
-          // safe to extract
-          res = s[i + 4];
+          res = s[i + 4]; // safe to extract
         }
       }
     }
@@ -477,7 +523,7 @@ void printByteArrayAsString(byte * data) {
 
 /* -------------------------------------------------------------------------------------- */
 /* getSimpleAnalogMap => simple map function between range [0-255]                        */
-/* getAnalogMap => map function between range [MIN_TIME-MAX_TIME]                         */
+/* getAnalogMap       => map function between range [MIN_TIME-MAX_TIME]                   */
 int getSimpleAnalogMap(int value) {
   return (MY_DIVISION * value); // use float calculation with *.0
 }
@@ -485,3 +531,4 @@ int getSimpleAnalogMap(int value) {
 int getAnalogMap(int value) {
   return map(value, 0, 1023, MIN_TIME, MAX_TIME);
 }
+
