@@ -61,15 +61,16 @@ void setup() {
   pinMode(GREEN_IN, INPUT);
   pinMode(RED_IN, INPUT);
   pinMode(YELLOW_IN, INPUT);
+  pinMode(BUTTON, INPUT_PULLUP);
 
   Wire.begin(TRAFFIC_LIGHT_ID);
   Wire.onReceive(receiveEvent);
   Wire.onRequest(send_ack); /* only thing that is requested is the ACK */
 
-  cycle_time = 10000;
+  cycle_time = 4000;
   previous_millis = 0;
 
-  blinking = false;
+  blinking = true;
   is_yellow = false;
   stay_yellow = false;
   pedestrian = false;
@@ -87,6 +88,7 @@ void setup() {
   if (DEBUG) {
     Serial.begin(115200);
   }
+  send_red();
 }
 
 void loop() {
@@ -171,7 +173,7 @@ void turn_traffic_light_on(int clr) {
 void turn_traffic_light_off() {
   blinking = true;
   if (DEBUG) {
-    Serial.println("Blinking");
+    //Serial.println("Blinking");
   }
   send_ack();
 }
@@ -187,6 +189,7 @@ void start_cycle() {
   if (DEBUG) {
     Serial.println("Starting cycle");
   }
+  //current_color = clr;
   send_ack();
 }
 
@@ -256,6 +259,9 @@ void send_ack() {
 }
 
 void send_red() {
+  if (!red_working) {
+    return;
+  }
   make_red_msg();
   Wire.beginTransmission(MASTER_ADDRESS);
   Wire.write(data_out, MAX_BUFFER);
@@ -302,6 +308,7 @@ void watch_the_cycle() {
       transition_yellow_to_green();
     }
     else if (previous_color == GREEN_CLR) {
+      led_working();
       transition_yellow_to_red();
     }
   }
@@ -354,7 +361,7 @@ void led_working() {
 
 void blink_yellow() {
   if (DEBUG) {
-    Serial.println("blinking");
+    //Serial.println("blinking");
   }
   unsigned long current_millis = millis();
 
@@ -362,6 +369,9 @@ void blink_yellow() {
   if (current_millis - previous_millis >= 1000) {
     previous_millis = current_millis;
 
+    digitalWrite(GREEN_LED, LOW);
+    digitalWrite(RED_LED, LOW);
+    
     if (is_yellow) {
       digitalWrite(YELLOW_LED, LOW);
       is_yellow = false;
@@ -430,6 +440,7 @@ void transition_yellow_to_red() {
   digitalWrite(GREEN_LED, LOW); /* just to make sure */
   digitalWrite(YELLOW_LED, LOW);
   digitalWrite(RED_LED, HIGH);
+  led_working();
   send_red();
   previous_color = RED_CLR; /* so that we know where to start when
                                  we receive a start cycle message */
