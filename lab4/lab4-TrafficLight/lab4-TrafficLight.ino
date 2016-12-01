@@ -1,6 +1,6 @@
 #include <Wire.h>
 
-#define DEBUG 0
+#define DEBUG 1
 
 #define TRAFFIC_LIGHT_ID 9
 
@@ -8,16 +8,20 @@
 #define YELLOW_CLR 2
 #define RED_CLR 3
 
-#define GREEN_LED 2
-#define YELLOW_LED 3
-#define RED_LED 4
+#define GREEN_IN 8
+#define YELLOW_IN 9
+#define RED_IN 10
 
-#define PED_GREEN_LED 5 /* pedestrian traffic light */
-#define PED_RED_LED 6 /* pedestrian traffic light */
+#define GREEN_LED 5
+#define YELLOW_LED 6
+#define RED_LED 7
 
-#define BUTTON 7
+#define PED_GREEN_LED 3 /* pedestrian traffic light */
+#define PED_RED_LED 2 /* pedestrian traffic light */
 
-#define MASTER_ADDRESS 7
+#define BUTTON 4
+
+#define MASTER_ADDRESS 8
 
 #define MIN_TIME 4000
 #define MAX_TIME 10000
@@ -33,6 +37,7 @@ unsigned long previous_millis;
 
 int start_color;
 int previous_color;
+int current_color;
 
 boolean blinking;
 boolean is_yellow; /* when blinking, is the led yellow or not? */
@@ -41,76 +46,109 @@ boolean controller_alive;
 boolean pedestrian; /* used to know if there's a pedestrian trying to cross the street */
 boolean event_waiting; /* used to know if we have a command waiting to be serviced or not */
 
+boolean green_working;
+boolean red_working;
+boolean yellow_working;
+
+boolean state_changed;
+
 void setup() {
   pinMode(GREEN_LED, OUTPUT);
   pinMode(YELLOW_LED, OUTPUT);
   pinMode(RED_LED, OUTPUT);
   pinMode(PED_GREEN_LED, OUTPUT);
   pinMode(PED_GREEN_LED, OUTPUT);
+  pinMode(GREEN_IN, INPUT);
+  pinMode(RED_IN, INPUT);
+  pinMode(YELLOW_IN, INPUT);
+  pinMode(BUTTON, INPUT_PULLUP);
 
   Wire.begin(TRAFFIC_LIGHT_ID);
   Wire.onReceive(receiveEvent);
   Wire.onRequest(send_ack); /* only thing that is requested is the ACK */
 
-  cycle_time = 0;
+  cycle_time = 4000;
   previous_millis = 0;
-  
+
   blinking = true;
   is_yellow = false;
   stay_yellow = false;
   pedestrian = false;
   controller_alive = true;
 
-  previous_color = YELLOW_CLR;
+  green_working = true;
+  red_working = true;
+  yellow_working = true;
+
+  state_changed = false;
+
+  previous_color = RED_CLR;
+  current_color = RED_CLR;
 
   if (DEBUG) {
     Serial.begin(115200);
   }
+  send_red();
 }
 
 void loop() {
-  /* if it's blinking or the controller is dead, 
-   * the traffic light should start blinking */
-  if (blinking || !controller_alive) {
+  /* if it's blinking or the controller is dead,
+     the traffic light should start blinking */
+  //check_state();
+
+  //send_ping();
+  //delay(5000);
+  //send_ack();
+
+  //delay(5000);
+  led_working();
+
+  if ((blinking || !controller_alive) && yellow_working) {
     blink_yellow();
   }
-  else if (event_waiting) {
+  if (event_waiting) {
     event_waiting = false;
     read_command();
   }
-  else if (pedestrian) {
+  if (pedestrian) {
     pedestrian = false;
     shorten_cycle();
   }
+  if (!red_working) {
+    blinking = true;
+    blink_yellow();
+  }
+  if (!green_working) {
+    blinking = true;
+    blink_yellow();
+  }
   /* if we received a ON YELLOW, we just stay yellow */
-  else if (stay_yellow) {
+  if (stay_yellow) {
     transition_to_yellow();
   }
   /*normal functioning: keep on changing colors */
-  else {
-    watch_the_cycle();
-  }
+  watch_the_cycle();
 }
 
-/* 
- *  API: functions to be executed when the 
- *  messages are received via I2C
- */
+/*
+    API: functions to be executed when the
+    messages are received via I2C
+*/
 
-/* 
- *  to be executed when the traffic light
- *  receives an ON message
- */
+/*
+    to be executed when the traffic light
+    receives an ON message
+*/
 void turn_traffic_light_on(int clr) {
   start_color = clr;
   blinking = false;
   previous_millis = 0;
-  
+
   if (DEBUG) {
     Serial.print("Start color: ");
     Serial.println(clr);
   }
-  
+
   if (clr == GREEN_CLR) {
     stay_yellow = false;
     transition_red_to_yellow(); /* make sure it is yellow before green */
@@ -118,46 +156,47 @@ void turn_traffic_light_on(int clr) {
   }
   else if (clr == YELLOW_CLR) {
     transition_to_yellow();
-    stay_yellow = true; 
+    stay_yellow = true;
   }
   else if (clr == RED_CLR) {
     stay_yellow = false;
     transition_yellow_to_red();
   }
-  
+
   send_ack();
 }
 
-/* 
- *  to be executed when the traffic light
- *  receives an OFF message
- */
+/*
+    to be executed when the traffic light
+    receives an OFF message
+*/
 void turn_traffic_light_off() {
   blinking = true;
-   if (DEBUG) {
-    Serial.println("Blinking");
+  if (DEBUG) {
+    //Serial.println("Blinking");
   }
   send_ack();
 }
 
-/* 
- *  to be executed when the traffic light
- *  receives a GRN message
- */
+/*
+    to be executed when the traffic light
+    receives a GRN message
+*/
 void start_cycle() {
   blinking = false;
   previous_millis = 0;
-  
+
   if (DEBUG) {
     Serial.println("Starting cycle");
   }
+  //current_color = clr;
   send_ack();
 }
 
-/* 
- *  to be executed when the traffic light
- *  receives a TIME message
- */
+/*
+    to be executed when the traffic light
+    receives a TIME message
+*/
 void cycle_time_reset(int new_time) {
   if (DEBUG) {
     Serial.print("Cycle changed from ");
@@ -169,10 +208,10 @@ void cycle_time_reset(int new_time) {
   send_ack();
 }
 
-/* 
- *  to be executed when the traffic light
- *  receives a PING message
- */
+/*
+    to be executed when the traffic light
+    receives a PING message
+*/
 void ping() {
   if (DEBUG) {
     Serial.println("Ping received");
@@ -181,10 +220,10 @@ void ping() {
   send_ack();
 }
 
-/* 
- *  to be executed when the traffic light
- *  receives an ACK message
- */
+/*
+    to be executed when the traffic light
+    receives an ACK message
+*/
 void ack() {
   if (DEBUG) {
     Serial.println("ACK received");
@@ -206,17 +245,23 @@ void send_ping() {
 }
 
 void send_ack() {
+  if (DEBUG) {
+    Serial.println("send ack");
+  }
   make_ack_msg();
-  Wire.beginTransmission(MASTER_ADDRESS);
+  //Wire.beginTransmission(MASTER_ADDRESS);
   Wire.write(data_out, MAX_BUFFER);
-  Wire.endTransmission();
-  
+  //Wire.endTransmission();
+
   if (DEBUG) {
     Serial.println("Ack sent");
   }
 }
 
 void send_red() {
+  if (!red_working) {
+    return;
+  }
   make_red_msg();
   Wire.beginTransmission(MASTER_ADDRESS);
   Wire.write(data_out, MAX_BUFFER);
@@ -229,39 +274,104 @@ void send_red() {
 
 /* PEDESTRIAN FUNCTIONS */
 
-void shorten_cycle() 
+void shorten_cycle()
 {
-   unsigned long current_millis = millis();
+  unsigned long current_millis = millis();
 
-   if ((previous_millis - current_millis) >= (MIN_TIME / 2)) {
-     /* it's already in the end of the cycle, we can't shorten it */
-     previous_millis = millis(); /* let's just update time */
-   }
-   else {
-     /* the cycle duration will be cut down by half */
-     cycle_time = cycle_time / 2;
-   }
+  if ((previous_millis - current_millis) >= (MIN_TIME / 2)) {
+    /* it's already in the end of the cycle, we can't shorten it */
+    previous_millis = millis(); /* let's just update time */
+  }
+  else {
+    /* the cycle duration will be cut down by half */
+    cycle_time = cycle_time / 2;
+  }
 }
 
 /* TRAFFIC LIGHT NORMAL FUNCTIONING */
 
-void watch_the_cycle()
-{
+void watch_the_cycle() {
+  if (blinking) {
+    return;
+  }
+
+  unsigned long current_millis = millis();
+
+  if (current_color == YELLOW_CLR &&
+     ((current_millis - previous_millis) >= 1000)) {
+    if (DEBUG) {
+      Serial.println("next color");
+      Serial.println(current_millis - previous_millis);
+    }
+    previous_millis = millis();
+    if (previous_color == RED_CLR) {
+      transition_yellow_to_green();
+    }
+    else if (previous_color == GREEN_CLR) {
+      led_working();
+      transition_yellow_to_red();
+    }
+  }
   
+  /* see if we need to change to yellow */
+  else if (current_color != YELLOW_CLR &&
+          ((current_millis - previous_millis) >= (cycle_time - 1000))) {
+    if (DEBUG) {
+      Serial.println("to yellow");
+      Serial.println((current_millis - previous_millis));
+    }
+    previous_millis = millis();
+    transition_to_yellow();
+  }
+  /* can transition to next color */
+
+}
+
+void led_working() {
+  if (digitalRead(GREEN_IN) == HIGH) {
+    green_working = false;
+    if (DEBUG) {
+      Serial.println("green not working");
+    }
+  }
+  else {
+    green_working = true;
+  }
+  if (digitalRead(RED_IN) == HIGH) {
+    red_working = false;
+    if (DEBUG) {
+      Serial.println("red not working");
+    }
+  }
+  else {
+    red_working = true;
+  }
+  if (digitalRead(YELLOW_IN) == HIGH) {
+    yellow_working = false;
+    if (DEBUG) {
+      Serial.println("yellow not working");
+    }
+  }
+  else {
+    yellow_working = true;
+  }
 }
 
 /* TRAFFIC LIGHT COLOR TRANSITIONS */
 
 void blink_yellow() {
   if (DEBUG) {
-    Serial.println("blinking");
+    //Serial.println("blinking");
   }
   unsigned long current_millis = millis();
 
   /* blink in intervals of 1s */
-  if (current_millis - previous_millis >= 1000) { 
+  if (current_millis - previous_millis >= 1000) {
     previous_millis = current_millis;
 
+    digitalWrite(GREEN_LED, LOW);
+    digitalWrite(RED_LED, LOW);
+    
     if (is_yellow) {
       digitalWrite(YELLOW_LED, LOW);
       is_yellow = false;
@@ -277,52 +387,64 @@ void transition_to_yellow() {
   if (DEBUG) {
     Serial.println("Staying yellow");
   }
+  led_working();
   digitalWrite(YELLOW_LED, HIGH);
   digitalWrite(RED_LED, LOW);
   digitalWrite(GREEN_LED, LOW);
+
+  current_color = YELLOW_CLR;
 }
 
 void transition_red_to_yellow() {
   if (DEBUG) {
     Serial.println("Transition from red to yellow");
   }
+  led_working();
   digitalWrite(GREEN_LED, LOW); /* just to make sure */
   digitalWrite(RED_LED, LOW);
   digitalWrite(YELLOW_LED, HIGH);
-  delay(1000); // wait 1s
+
+  current_color = YELLOW_CLR;
 }
 
 void transition_yellow_to_green() {
   if (DEBUG) {
     Serial.println("Transition from yellow to green");
   }
+  led_working();
   digitalWrite(RED_LED, LOW); /* just to make sure */
   digitalWrite(YELLOW_LED, LOW);
   digitalWrite(GREEN_LED, HIGH);
   previous_color = GREEN_CLR; /* so that we know where to start when
                                  we receive a start cycle message */
+  current_color = GREEN_CLR;
 }
 
 void transition_green_to_yellow() {
   if (DEBUG) {
     Serial.println("Transition from green to yellow");
   }
+  led_working();
   digitalWrite(RED_LED, LOW); /* just to make sure */
   digitalWrite(GREEN_LED, LOW);
   digitalWrite(YELLOW_LED, HIGH);
-  delay(1000); // wait 1s
+
+  current_color = YELLOW_CLR;
 }
 
 void transition_yellow_to_red() {
   if (DEBUG) {
     Serial.println("Transition from yellow to red");
   }
+  led_working();
   digitalWrite(GREEN_LED, LOW); /* just to make sure */
   digitalWrite(YELLOW_LED, LOW);
   digitalWrite(RED_LED, HIGH);
+  led_working();
   send_red();
   previous_color = RED_CLR; /* so that we know where to start when
                                  we receive a start cycle message */
+  current_color = RED_CLR;
 }
 
 void pedestrian_to_green() {
@@ -389,6 +511,10 @@ void receiveEvent(int howMany) {
   }
 
   Wire.readBytes(data_in, howMany);
+  if (DEBUG) {
+    Serial.print("Received: ");
+    printByteArrayAsString(data_in);
+  }
   event_waiting = true;
 }
 
@@ -400,7 +526,7 @@ void read_command() {
   if (DEBUG) {
     Serial.println("Reading a command");
   }
-  
+
   for (i = 0; i < MAX_BUFFER; i++) {
     if (data_in[i] == 'P') {
       read_ping(i);
@@ -441,10 +567,10 @@ void read_on(int i) {
   }
 
   /*
-   * ON occupies 4 (ON X), buffer has space for 8. if 
-   * it starts on i > 4, then we won't be able to
-   * extract an on command from the buffer
-   */
+     ON occupies 4 (ON X), buffer has space for 8. if
+     it starts on i > 4, then we won't be able to
+     extract an on command from the buffer
+  */
   if (i > 4) {
     if (DEBUG) {
       Serial.println("i is bigger than 4 so it's impossible to read the command");
@@ -467,10 +593,10 @@ void read_off(int i) {
     Serial.println("Reading off");
   }
   /*
-   * OFF has 3 letters, buffer has space for 8. if 
-   * it starts on i > 5, then we won't be able to
-   * extract an off command from the buffer
-   */
+     OFF has 3 letters, buffer has space for 8. if
+     it starts on i > 5, then we won't be able to
+     extract an off command from the buffer
+  */
   if (i > 5) {
     if (DEBUG) {
       Serial.println("i is bigger than 5 so it's impossible to read the command");
@@ -487,18 +613,18 @@ void read_off(int i) {
 }
 
 void read_ping(int i) {
-  /* 
-   * data_in[i] contains the first letter,
-   * we want to read from then on
-   */
+  /*
+     data_in[i] contains the first letter,
+     we want to read from then on
+  */
   if (DEBUG) {
     Serial.println("Reading ping");
   }
   /*
-   * PING has 4 letters, buffer has space for 8. if 
-   * it starts on i > 4, then we won't be able to
-   * extract a ping command from the buffer
-   */
+     PING has 4 letters, buffer has space for 8. if
+     it starts on i > 4, then we won't be able to
+     extract a ping command from the buffer
+  */
   if (i > 4) {
     if (DEBUG) {
       Serial.println("i is bigger than 4 so it's impossible to read the command");
@@ -506,7 +632,7 @@ void read_ping(int i) {
     return;
   }
 
-   /* otherwise, it's safe to extract all the letters */
+  /* otherwise, it's safe to extract all the letters */
   if (data_in[i + 1] != 'I') {
     return;
   }
@@ -517,8 +643,8 @@ void read_ping(int i) {
     return;
   }
 
-   /* we've reached the end, it's a ping command */
-   ping();
+  /* we've reached the end, it's a ping command */
+  ping();
 }
 
 void read_ack(int i) {
@@ -526,10 +652,10 @@ void read_ack(int i) {
     Serial.println("Reading ack");
   }
   /*
-   * ACK has 3 letters, buffer has space for 8. if 
-   * it starts on i > 5, then we won't be able to
-   * extract an ack command from the buffer
-   */
+     ACK has 3 letters, buffer has space for 8. if
+     it starts on i > 5, then we won't be able to
+     extract an ack command from the buffer
+  */
   if (i > 5) {
     if (DEBUG) {
       Serial.println("i is bigger than 5 so it's impossible to read the command");
@@ -546,7 +672,7 @@ void read_ack(int i) {
   }
 
   /* we've reached the end, it's an ack command */
-   ack();
+  ack();
 }
 
 void read_time(int i) {
@@ -554,10 +680,10 @@ void read_time(int i) {
     Serial.println("Reading time");
   }
   /*
-   * TIME occupies 6 (TIME X), buffer has space for 8. if 
-   * it starts on i > 2, then we won't be able to
-   * extract a time command from the buffer
-   */
+     TIME occupies 6 (TIME X), buffer has space for 8. if
+     it starts on i > 2, then we won't be able to
+     extract a time command from the buffer
+  */
   if (i > 2) {
     if (DEBUG) {
       Serial.println("i is bigger than 2 so it's impossible to read the command");
@@ -578,11 +704,20 @@ void read_time(int i) {
   if (data_in[i + 4] != ' ') {
     return;
   }
-  
-  int new_time = data_in[i + 5];
+
+  int new_time = map_time(data_in[i + 5]);
+
+  if (DEBUG) {
+    Serial.print("New time: ");
+    Serial.println(new_time);
+  }
 
   /* we've reached the end, it's a time command */
-   cycle_time_reset(new_time);
+  cycle_time_reset(new_time);
+}
+
+int map_time(byte value) {
+  return map(value, 0, 255, MIN_TIME, MAX_TIME);
 }
 
 void read_grn(int i) {
@@ -590,10 +725,10 @@ void read_grn(int i) {
     Serial.println("Reading grn");
   }
   /*
-   * GRN has 3 letters, buffer has space for 8. if 
-   * it starts on i > 5, then we won't be able to
-   * extract a grn command from the buffer
-   */
+     GRN has 3 letters, buffer has space for 8. if
+     it starts on i > 5, then we won't be able to
+     extract a grn command from the buffer
+  */
   if (i > 5) {
     if (DEBUG) {
       Serial.println("i is bigger than 5 so it's impossible to read the command");
@@ -610,6 +745,6 @@ void read_grn(int i) {
   }
 
   /* we've reached the end, it's an ack command */
-   start_cycle();
+  start_cycle();
 }
 
