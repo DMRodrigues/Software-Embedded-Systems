@@ -7,9 +7,12 @@
 #define BUS_LED   4
 #define BUTTON_SW 5
 
-#define RED    1
+#define NUM_FAILS 2
+#define IGNORE_FAILS 1 /* disable the auto-shutdow when TL dead */
+
+#define GREEN  1
 #define YELLOW 2
-#define GREEN  3
+#define RED    3
 
 #define MY_ADDR  8
 #define TL_SIZE  2 /* we have two traffic light */
@@ -23,35 +26,33 @@
 #define MAX_BUFFER 8
 byte data_out[MAX_BUFFER]; /* buffer to send data to slaves */
 
+int in1_flag;
+int in1_howMany;
 byte data_in1[MAX_BUFFER]; /* buffer to receive data from slaves */
-int in1_flag = 0;
-int in1_howMany = 0;
 
+int in2_flag;
+int in2_howMany;
 byte data_in2[MAX_BUFFER]; /* buffer to receive data from slaves */
-int in2_flag = 0;
-int in2_howMany = 0;
 
+int in3_flag;
+int in3_howMany;
 byte data_in3[MAX_BUFFER]; /* buffer to receive data from slaves */
-int in3_flag = 0;
-int in3_howMany = 0;
 
-byte buff_ping[MAX_BUFFER]; /* buffer to be used with ping commands */
-byte ping_res[TL_SIZE]; /* count cycles of TLs is nok, to perform shutdown */
 int wait_tl1; /* say I waiting answer */
 int wait_tl2;
+byte ping_res[TL_SIZE]; /* count cycles of TLs is nok, to perform shutdown */
+byte buff_ping[MAX_BUFFER]; /* buffer to be used with ping commands */
 
-int button_state;
-int lastButtonState = HIGH;
-
+boolean do_internal;
 int controller_state = 0; /* 0-OFF, 1-ON */
-int internal = 0;
 unsigned long previousCycle;
+int lastButtonState = HIGH;
 
 #define POT_ERROR 3
 const int potPin = A0;
 int pot_val;
 int last_pot;
-int val_sent = 0;
+boolean val_sent;
 const unsigned long potInterval = 500;
 unsigned long potPrevious;
 
@@ -74,14 +75,9 @@ void setup() {
   digitalWrite(BUS_LED, LOW);
   pinMode(BUTTON_SW, INPUT_PULLUP);
 
-  previousCycle = millis();
-  potPrevious = previousCycle;
+  do_internal = false;
 
-  memset(data_out, 0, MAX_BUFFER);
-  memset(data_in1, 0, MAX_BUFFER);
-  memset(data_in2, 0, MAX_BUFFER);
-  memset(buff_ping, 0, MAX_BUFFER);
-  memset(ping_res, 0, TL_SIZE);
+  clean_routine(); /* code reuse */
 
   if (DEBUG)
     Serial.println("Will start loop");
@@ -89,48 +85,52 @@ void setup() {
 }
 
 void loop() {
-  check_state();
+  check_button();
 
   if (controller_state == 0) {
     /* OFF */
-    if (internal) {
+    if (do_internal) {
       if (DEBUG)
         Serial.println("Controller Off");
+
       make_off_msg();
-      send_data(TL1_ADDR, 0);
-      Serial.print("\t");
-      send_data(TL2_ADDR, 0);
+      send_data(TL1_ADDR, -1);
+      if (DEBUG)
+        Serial.print("\t");
+      send_data(TL2_ADDR, -1);
+
       digitalWrite(RED_LED, HIGH);
       digitalWrite(GREEN_LED, LOW);
-      internal = 0; // no need to repeat
+      do_internal = false; // no need to repeat
     }
     /* more OFF state things to do */
 
   } else {
     /* ON */
-    if (internal) {
+    if (do_internal) {
       if (DEBUG)
         Serial.println("Controller On");
-      restart_routine();
-      internal = 0; // no need to repeat
 
-      /* send red to one */
-      make_on_msg(RED);
+      clean_routine();
+      do_internal = false; // no need to repeat
+
+      digitalWrite(RED_LED, LOW);
+      digitalWrite(GREEN_LED, HIGH);
+
+      execute_pot();
+
+      make_on_msg(RED); /* send red to one */
       send_data(TL1_ADDR, &wait_tl1);
 
-      /* and green to other */
-      make_on_msg(GREEN);
+      make_on_msg(GREEN); /* and green to other */
       send_data(TL2_ADDR, &wait_tl2);
     }
 
-    execute_pot(); /* verify if the reading changed to update TL | worst cae: 60ms */
+    execute_pot(); /* verify if the reading changed to update TL */
 
-    do_verify_data();
+    do_verify_data(); /* worst case: 60ms wasted */
 
     check_cycles(); /* verify if any TL needs ping */
-    check_tl_dead(); /* verify if any TL is dead to shutdown */
-
-    do_verify_data(); /* must be executed because whe need buffer processed and new info */
   }
 
 }
@@ -140,41 +140,48 @@ void loop() {
 /* say to controller must change to off                                                   */
 void set_off() {
   controller_state = 0;
-  internal = 1;
+  do_internal = true;
 }
 
 /* reset all variables to be used again                                                   */
-void restart_routine() {
-  digitalWrite(RED_LED, LOW);
-  digitalWrite(GREEN_LED, HIGH);
-  ping_res[0] = 0;
-  ping_res[1] = 0;
+void clean_routine() {
+  in1_flag = 0;
+  in2_flag = 0;
+  in3_flag = 0;
   wait_tl1 = 0;
   wait_tl2 = 0;
-  last_pot = 0;
-  val_sent = 0;
+  last_pot = -1;
+  pot_val = 4000;
+  in1_howMany = 0;
+  in2_howMany = 0;
+  in3_howMany = 0;
+  val_sent = false;
   previousCycle = millis();
   potPrevious = previousCycle;
   memset(data_out, 0, MAX_BUFFER);
   memset(data_in1, 0, MAX_BUFFER);
   memset(data_in2, 0, MAX_BUFFER);
+  memset(data_in3, 0, MAX_BUFFER);
   memset(buff_ping, 0, MAX_BUFFER);
   memset(ping_res, 0, TL_SIZE);
 }
 
+
 /* -------------------------------------------------------------------------------------- */
-void check_state() {
-  button_state = digitalRead(BUTTON_SW);
-  // improve the read
-  if (button_state == LOW) {
+/* to detect when button is pressed and change state                                      */
+void check_button() {
+  /* beware of debounce while reading */
+  if (digitalRead(BUTTON_SW) == LOW) {
     delay(20); // stable the read
     controller_state = !controller_state;
-    internal = 1;
+    do_internal = true;
     while (digitalRead(BUTTON_SW) != HIGH) {
       delay(20);  // until released
     }
-    Serial.print("check_state: ");
-    Serial.println(controller_state);
+    if (DEBUG) {
+      Serial.print("check_button: ");
+      Serial.println(controller_state);
+    }
   }
 }
 
@@ -187,28 +194,30 @@ void execute_pot() {
   if ((val - last_pot > POT_ERROR) || (last_pot - val > POT_ERROR)) {
     last_pot = val;
     potPrevious = millis();
-    val_sent = 0;
-    if (DEBUG)
-      Serial.println("===============> NEW READ");
+    val_sent = false;
   }
+
   /* did the pot stop rotating for half second ? */
-  if ((millis() - potPrevious >= potInterval) && !val_sent) {
-    if (DEBUG)
+  if (!val_sent && (millis() - potPrevious >= potInterval)) {
+    if (DEBUG) {
+      Serial.println("------------------------------------");
       Serial.print("execute_pot: ");
+    }
 
     pot_val = getAnalogMap(val); // get time to be used to count cycle
-    if (DEBUG) {
-      Serial.print(pot_val);
-      Serial.print(" | ");
-    }
-    // make_time_msg(getSimpleAnalogMap(val));
-    make_time_msg_mapped(pot_val);
+
+    // make_time_msg(gpot_val);
+    make_time_msg_mapped(getSimpleAnalogMap(val));
 
     send_data(TL1_ADDR, &wait_tl1);
-    Serial.print("\t");
+    if (DEBUG)
+      Serial.print("\t\t");
     send_data(TL2_ADDR, &wait_tl2);
     delay(10); // to process
-    val_sent = 1;
+    val_sent = true;
+
+    if (DEBUG)
+      Serial.println("------------------------------------");
   }
 }
 
@@ -235,7 +244,7 @@ void send_data(int slave_add, int* to_inc) {
     (*to_inc)++;
 
   digitalWrite(BUS_LED, LOW);
-  delay(50); // to process request
+  delay(30); // to process request
 }
 
 /* DO NOT USE */
@@ -250,11 +259,11 @@ void broadcast_data() {
     printByteArrayAsStringln(data_out);
   }
   digitalWrite(BUS_LED, LOW);
-  delay(50); // to process request
+  delay(30); // to process request
 }
 
 void make_ping(int slave_add) {
-  int i = 0;
+  int i = 0, res_id = -1, j;
   if (DEBUG)
     Serial.println("Requesting ping");
 
@@ -270,13 +279,16 @@ void make_ping(int slave_add) {
     printByteArrayAsString(buff_ping);
   }
 
-  int res_id = extract_ack_id(buff_ping, i); /* see valid ACK answer */
+  for (j = 0; j < i; j++) {
+    if (buff_ping[j] == 'A')
+      res_id = extract_ack_id(buff_ping, j); /* see valid ACK answer */
+  }
 
   map_tl_ping(slave_add, res_id);
 
   memset(buff_ping, 0, MAX_BUFFER);
   if (DEBUG) {
-    Serial.print("Slave answer: ");
+    Serial.print("\tSlave answer: ");
     Serial.println(res_id);
   }
 }
@@ -317,11 +329,8 @@ void map_tl_ping(int sa, int rid) {
       if (rid == -1)
         ping_res[0] = ping_res[0] + 1; /* to count the cycles is down */
       else {
-        wait_tl1--;
-        if (wait_tl1 <= 0) {
-          wait_tl1 = 0;
-          ping_res[0] = 0;
-        }
+        wait_tl1 = 0; /* we got fresh answer is alive, so reset counter */
+        ping_res[0] = 0;
       }
       if (DEBUG) {
         Serial.print("map_tl_ping | TL1 | ");
@@ -334,11 +343,8 @@ void map_tl_ping(int sa, int rid) {
       if (rid == -1)
         ping_res[1] = ping_res[1] + 1; /* to count the cycles is down */
       else {
-        wait_tl2--;
-        if (wait_tl2 <= 0) {
-          wait_tl2 = 0;
-          ping_res[1] = 0;
-        }
+        wait_tl2 = 0; /* we got fresh answer is alive, so reset counter */
+        ping_res[1] = 0;
       }
       if (DEBUG) {
         Serial.print("map_tl_ping | TL2 | ");
@@ -348,18 +354,9 @@ void map_tl_ping(int sa, int rid) {
       }
       break;
     default:
+      if (DEBUG)
+        Serial.println("map_tl_ping | WRONG");
       break;
-  }
-}
-
-
-/* -------------------------------------------------------------------------------------- */
-/* if any TL is dead 2 cycles then begin shutdown                                         */
-void check_tl_dead() {
-  if ((ping_res[0] >= 2) || (ping_res[1] >= 2)) {
-    if (DEBUG)
-      Serial.println("HAVE ONE TL DEAD");
-    set_off();
   }
 }
 
@@ -372,19 +369,34 @@ void check_cycles() {
 
   if (currentMillis - previousCycle >= ((unsigned long) pot_val)) {
     previousCycle = currentMillis;  // save the last time of cycle
-    if (DEBUG)
+    if (DEBUG) {
+      Serial.println("====================================");
       Serial.println("check_cycles");
+    }
 
     // do we need to ping ?
-    if (ping_res[0] > 0) {
+    if (wait_tl1 > 0) {
       if (DEBUG)
         Serial.print("TL1 | ");
       make_ping(TL1_ADDR);
     }
-    if (ping_res[1] > 0) {
+
+    if (wait_tl2 > 0) {
       if (DEBUG)
         Serial.print("TL2 | ");
       make_ping(TL2_ADDR);
+    }
+
+    if (DEBUG)
+      Serial.println("====================================");
+
+    /* if any TL is dead for 2 cycles then begin shutdown */
+    if (!IGNORE_FAILS) { /* in case we have only one TL for testing */
+      if ((ping_res[0] >= NUM_FAILS) || (ping_res[1] >= NUM_FAILS)) {
+        if (DEBUG)
+          Serial.println("HAVE ONE TL DEAD");
+        set_off();
+      }
     }
   }
 }
@@ -440,7 +452,7 @@ void verify_command(byte * s, int s_size) {
       id = extract_ping_id(s, i);
       if (id != -1) {
         make_ack_msg();
-        send_data(id, 0); // dont care for ack
+        send_data(id, -1); // dont care for ack
       }
       else {
         // bad PING request
@@ -465,10 +477,19 @@ void verify_command(byte * s, int s_size) {
         if (DEBUG)
           Serial.print("RED | ");
         make_grn_msg();
-        if (id == TL1_ADDR)
+        if (id == TL1_ADDR) {
           send_data(TL2_ADDR, &wait_tl2);
-        else
+          make_ack_msg();
+          send_data(TL1_ADDR, -1);
+        }
+        else if (id == TL2_ADDR) {
           send_data(TL1_ADDR, &wait_tl1);
+          make_ack_msg();
+          send_data(TL2_ADDR, -1);
+        }
+        else {
+          // bad TL to answer
+        }
       }
       else {
         // bad RED received, shutdown?
@@ -485,7 +506,6 @@ void verify_command(byte * s, int s_size) {
 
 /* -------------------------------------------------------------------------------------- */
 int extract_ping_id(byte * s, int i) {
-  int res = -1;
   if (DEBUG)
     Serial.print("extract_ping_id: ");
   /*
@@ -494,25 +514,23 @@ int extract_ping_id(byte * s, int i) {
     extract a ping command from the buffer
   */
   if (i > 2)
-    return res;
+    return -1;
 
   if (s[i + 1] != 'I')
-    return res;
+    return -1;
   if (s[i + 2] != 'N')
-    return res;
+    return -1;
   if (s[i + 3] != 'G')
-    return res;
+    return -1;
   if (s[i + 4] != ' ')
-    return res;
+    return -1;
 
-  res = s[i + 5]; // safe to extract
   if (DEBUG)
-    Serial.println(res);
-  return res;
+    Serial.println(s[i + 5]);
+  return s[i + 5]; // safe to extract
 }
 
 int extract_ack_id(byte * s, int i) {
-  int res = -1;
   if (DEBUG)
     Serial.print("extract_ack_id: ");
   /*
@@ -521,23 +539,21 @@ int extract_ack_id(byte * s, int i) {
     extract an ack command from the buffer
   */
   if (i > 3)
-    return res;
+    return -1;
 
   if (s[i + 1] != 'C')
-    return res;
+    return -1;
   if (s[i + 2] != 'K')
-    return res;
+    return -1;
   if (s[i + 3] != ' ')
-    return res;
+    return -1;
 
-  res = s[i + 4]; // safe to extract
   if (DEBUG)
-    Serial.println(res);
-  return res;
+    Serial.println(s[i + 4]);
+  return s[i + 4]; // safe to extract
 }
 
 int extract_red_id(byte * s, int i) {
-  int res = -1;
   if (DEBUG)
     Serial.print("extract_red_id: ");
   /*
@@ -546,19 +562,18 @@ int extract_red_id(byte * s, int i) {
     extract an red command from the buffer
   */
   if (i > 3)
-    return res;
+    return -1;
 
   if (s[i + 1] != 'E')
-    return res;
+    return -1;
   if (s[i + 2] != 'D')
-    return res;
+    return -1;
   if (s[i + 3] != ' ')
-    return res;
+    return -1;
 
-  res = s[i + 4]; // safe to extract
   if (DEBUG)
-    Serial.println(res);
-  return res;
+    Serial.println(s[i + 4]);
+  return s[i + 4]; // safe to extract
 }
 
 
