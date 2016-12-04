@@ -8,16 +8,16 @@
 #define YELLOW_CLR 2
 #define RED_CLR 3
 
-#define GREEN_IN 8
-#define YELLOW_IN 9
-#define RED_IN 10
-
 #define GREEN_LED 5
 #define YELLOW_LED 6
 #define RED_LED 7
 
-#define PED_GREEN_LED 3 /* pedestrian traffic light */
-#define PED_RED_LED 2 /* pedestrian traffic light */
+#define PED_GREEN_LED 2 /* pedestrian traffic light */
+#define PED_RED_LED 3 /* pedestrian traffic light */
+
+#define GREEN_IN 8 /* to know if the green led is working */
+#define YELLOW_IN 9 /* to know if the yellow led is working */
+#define RED_IN 10 /* to know if the red led is working */
 
 #define BUTTON 4
 
@@ -30,34 +30,38 @@
 
 byte data_out[MAX_BUFFER]; /* buffer to send data to master */
 byte data_in[MAX_BUFFER]; /* buffer to receive data from master */
-byte buff_ping[MAX_BUFFER]; /* buffer to be used with ping commands */
 
-int cycle_time;
+unsigned long cycle_time;
+unsigned long original_cycle_time;
 unsigned long previous_millis;
+unsigned long previous_cycle;
 
-int start_color;
 int previous_color;
 int current_color;
+
+int missed_cycles;
+int waiting_responses; /* how many responses we are waiting from the controller */
 
 boolean blinking;
 boolean is_yellow; /* when blinking, is the led yellow or not? */
 boolean stay_yellow; /* when we receive an ON YELLOW the traffic light should stay yellow until told otherwise */
-boolean controller_alive;
+boolean can_start; /* when the traffic light receives a GRN message, it can go yellow -> green */
+boolean controller_alive; 
 boolean pedestrian; /* used to know if there's a pedestrian trying to cross the street */
 boolean event_waiting; /* used to know if we have a command waiting to be serviced or not */
 
-boolean green_working;
-boolean red_working;
-boolean yellow_working;
+boolean green_working; /* is the green led working? */
+boolean red_working; /* is the red led working? */
+boolean yellow_working; /* is the yellow led working? */
 
-boolean state_changed;
+boolean button_read; /* if somebody has already clicked the button, we don't need to take care of it anymore until it is green again */
 
 void setup() {
   pinMode(GREEN_LED, OUTPUT);
   pinMode(YELLOW_LED, OUTPUT);
   pinMode(RED_LED, OUTPUT);
   pinMode(PED_GREEN_LED, OUTPUT);
-  pinMode(PED_GREEN_LED, OUTPUT);
+  pinMode(PED_RED_LED, OUTPUT);
   pinMode(GREEN_IN, INPUT);
   pinMode(RED_IN, INPUT);
   pinMode(YELLOW_IN, INPUT);
@@ -65,14 +69,21 @@ void setup() {
 
   Wire.begin(TRAFFIC_LIGHT_ID);
   Wire.onReceive(receiveEvent);
-  Wire.onRequest(send_ack); /* only thing that is requested is the ACK */
+  Wire.onRequest(send_ack_request); /* only thing that is requested is the ACK */
 
   cycle_time = 4000;
-  previous_millis = 0;
+  original_cycle_time = 4000;
+  previous_millis = millis();
+  previous_cycle = millis();
+
+  missed_cycles = 0;
+  waiting_responses = 0;
 
   blinking = true;
-  is_yellow = false;
+  is_yellow = true;
   stay_yellow = false;
+  can_start = false;
+  
   pedestrian = false;
   controller_alive = true;
 
@@ -80,54 +91,51 @@ void setup() {
   red_working = true;
   yellow_working = true;
 
-  state_changed = false;
-
-  previous_color = RED_CLR;
-  current_color = RED_CLR;
-
+  button_read = false;
+  
   if (DEBUG) {
     Serial.begin(115200);
   }
-  send_red();
 }
 
 void loop() {
+  
+  leds_working(); /* check if the leds are working */
+
+  watch_the_cycle(); /* do the normal functioning of a traffic light */
+
+  check_controller(); /* check if the controller is alive */
+
+  /* check if anybody clicked the button during the green
+     if nobody has yet clicked */
+  if (!button_read && current_color == GREEN_CLR) {
+    check_button();
+  }
+  
   /* if it's blinking or the controller is dead,
      the traffic light should start blinking */
-  //check_state();
-
-  //send_ping();
-  //delay(5000);
-  //send_ack();
-
-  //delay(5000);
-  led_working();
-
-  if ((blinking || !controller_alive) && yellow_working) {
+  if (blinking || !controller_alive) {
     blink_yellow();
+    pedestrian_turn_off(); /* just to make sure these don't light up */
   }
+
+  /* check if we received anything */
   if (event_waiting) {
     event_waiting = false;
     read_command();
   }
+
+  /* check if we have a pedestrian waiting */
   if (pedestrian) {
     pedestrian = false;
     shorten_cycle();
   }
-  if (!red_working) {
-    blinking = true;
-    blink_yellow();
-  }
-  if (!green_working) {
-    blinking = true;
-    blink_yellow();
-  }
+
   /* if we received a ON YELLOW, we just stay yellow */
   if (stay_yellow) {
     transition_to_yellow();
+    pedestrian_turn_off(); /* just to make sure these don't light up */
   }
-  /*normal functioning: keep on changing colors */
-  watch_the_cycle();
 }
 
 /*
@@ -140,30 +148,28 @@ void loop() {
     receives an ON message
 */
 void turn_traffic_light_on(int clr) {
-  start_color = clr;
+  previous_millis = millis();
+  stay_yellow = false;
   blinking = false;
-  previous_millis = 0;
+  
+  if (clr == YELLOW_CLR) {
+    stay_yellow = true;
+  }
+  else if (clr == RED_CLR) {
+    previous_color = GREEN_CLR;
+    current_color = YELLOW_CLR;
+    /* next color is red */
+  }
+  else if (clr == GREEN_CLR) {
+    previous_color = YELLOW_CLR;
+    current_color = RED_CLR;
+    /* next color is green */
+  }
 
   if (DEBUG) {
     Serial.print("Start color: ");
     Serial.println(clr);
   }
-
-  if (clr == GREEN_CLR) {
-    stay_yellow = false;
-    transition_red_to_yellow(); /* make sure it is yellow before green */
-    transition_yellow_to_green(); /* turn green */
-  }
-  else if (clr == YELLOW_CLR) {
-    transition_to_yellow();
-    stay_yellow = true;
-  }
-  else if (clr == RED_CLR) {
-    stay_yellow = false;
-    transition_yellow_to_red();
-  }
-
-  send_ack();
 }
 
 /*
@@ -173,9 +179,8 @@ void turn_traffic_light_on(int clr) {
 void turn_traffic_light_off() {
   blinking = true;
   if (DEBUG) {
-    //Serial.println("Blinking");
+    // Serial.println("Blinking");
   }
-  send_ack();
 }
 
 /*
@@ -184,13 +189,14 @@ void turn_traffic_light_off() {
 */
 void start_cycle() {
   blinking = false;
-  previous_millis = 0;
+  previous_millis = millis();
+  can_start = true;
+  previous_color = YELLOW_CLR;
+  current_color = RED_CLR;
 
   if (DEBUG) {
     Serial.println("Starting cycle");
   }
-  //current_color = clr;
-  send_ack();
 }
 
 /*
@@ -200,136 +206,22 @@ void start_cycle() {
 void cycle_time_reset(int new_time) {
   if (DEBUG) {
     Serial.print("Cycle changed from ");
-    Serial.print(cycle_time);
+    Serial.print(original_cycle_time);
     Serial.print(" to ");
     Serial.println(new_time);
   }
+  original_cycle_time = new_time;
   cycle_time = new_time;
-  send_ack();
 }
 
-/*
-    to be executed when the traffic light
-    receives a PING message
-*/
-void ping() {
-  if (DEBUG) {
-    Serial.println("Ping received");
-  }
+/* CHECK STATE FUNCTIONS */
 
-  send_ack();
-}
-
-/*
-    to be executed when the traffic light
-    receives an ACK message
-*/
-void ack() {
-  if (DEBUG) {
-    Serial.println("ACK received");
-  }
-  controller_alive = true;
-}
-
-/* FUNCTIONS TO SEND MESSAGES TO THE CONTROLLER */
-
-void send_ping() {
-  make_ping_msg();
-  Wire.beginTransmission(MASTER_ADDRESS);
-  Wire.write(data_out, MAX_BUFFER);
-  Wire.endTransmission();
-
-  if (DEBUG) {
-    Serial.println("Ping sent");
-  }
-}
-
-void send_ack() {
-  if (DEBUG) {
-    Serial.println("send ack");
-  }
-  make_ack_msg();
-  //Wire.beginTransmission(MASTER_ADDRESS);
-  Wire.write(data_out, MAX_BUFFER);
-  //Wire.endTransmission();
-
-  if (DEBUG) {
-    Serial.println("Ack sent");
-  }
-}
-
-void send_red() {
-  if (!red_working) {
-    return;
-  }
-  make_red_msg();
-  Wire.beginTransmission(MASTER_ADDRESS);
-  Wire.write(data_out, MAX_BUFFER);
-  Wire.endTransmission();
-
-  if (DEBUG) {
-    Serial.println("Red sent");
-  }
-}
-
-/* PEDESTRIAN FUNCTIONS */
-
-void shorten_cycle()
-{
-  unsigned long current_millis = millis();
-
-  if ((previous_millis - current_millis) >= (MIN_TIME / 2)) {
-    /* it's already in the end of the cycle, we can't shorten it */
-    previous_millis = millis(); /* let's just update time */
-  }
-  else {
-    /* the cycle duration will be cut down by half */
-    cycle_time = cycle_time / 2;
-  }
-}
-
-/* TRAFFIC LIGHT NORMAL FUNCTIONING */
-
-void watch_the_cycle() {
-  if (blinking) {
-    return;
-  }
-
-  unsigned long current_millis = millis();
-
-  if (current_color == YELLOW_CLR &&
-     ((current_millis - previous_millis) >= 1000)) {
-    if (DEBUG) {
-      Serial.println("next color");
-      Serial.println(current_millis - previous_millis);
-    }
-    previous_millis = millis();
-    if (previous_color == RED_CLR) {
-      transition_yellow_to_green();
-    }
-    else if (previous_color == GREEN_CLR) {
-      led_working();
-      transition_yellow_to_red();
-    }
-  }
-  
-  /* see if we need to change to yellow */
-  else if (current_color != YELLOW_CLR &&
-          ((current_millis - previous_millis) >= (cycle_time - 1000))) {
-    if (DEBUG) {
-      Serial.println("to yellow");
-      Serial.println((current_millis - previous_millis));
-    }
-    previous_millis = millis();
-    transition_to_yellow();
-  }
-  /* can transition to next color */
-
-}
-
-void led_working() {
+void leds_working() {
+  /* if the voltage coming from a led is high, 
+   *  then we know it's not working */
   if (digitalRead(GREEN_IN) == HIGH) {
     green_working = false;
+    blinking = true;
     if (DEBUG) {
       Serial.println("green not working");
     }
@@ -339,6 +231,7 @@ void led_working() {
   }
   if (digitalRead(RED_IN) == HIGH) {
     red_working = false;
+    blinking = true;
     if (DEBUG) {
       Serial.println("red not working");
     }
@@ -354,6 +247,109 @@ void led_working() {
   }
   else {
     yellow_working = true;
+  }
+}
+
+void check_controller() {
+  if (DEBUG) {
+    Serial.print("Missed cycles: ");
+    Serial.println(missed_cycles);
+    Serial.print("Waiting responses: ");
+    Serial.println(waiting_responses);
+  }
+  unsigned long current_millis = millis();
+
+  if ((current_millis - previous_cycle) >= cycle_time) {
+    if (waiting_responses > 0) {
+      send_ping();
+    }
+    previous_cycle = millis();
+  }
+}
+
+/* PEDESTRIAN FUNCTIONS */
+
+void check_button() {
+  // improve the read
+  if ((digitalRead(BUTTON) == LOW)) {
+    delay(10); // stable the read
+    pedestrian = true;
+    button_read = true;
+  }
+}
+
+void shorten_cycle()
+{
+  if (DEBUG) {
+    Serial.println("Shorten cycle");
+  }
+  unsigned long current_millis = millis();
+
+  /* if the time that has passed is less than MIN_TIME / 2, 
+     then the cycle can be cut down by half */
+  if ((cycle_time - (current_millis - previous_millis)) >= (MIN_TIME / 2)) {
+    original_cycle_time = cycle_time;
+    cycle_time = cycle_time / 2;
+  }
+  else {
+    /* it's already in the end of the cycle, we can't shorten it */
+    previous_millis = millis(); /* let's just update time */
+  }
+}
+
+/* TRAFFIC LIGHT NORMAL FUNCTIONING */
+
+void watch_the_cycle() {
+  /* if the traffic light is in the blinking state
+   *  then we don't have to do anything else and if
+   *  it is indefinitely yellow the same happens */
+  if (blinking || stay_yellow) {
+    return;
+  }
+
+  unsigned long current_millis = millis();
+
+  /* before transitioning to yellow -> green we need to make sure 
+     that we can (only after receiving the GRN message) */
+  if (current_color == RED_CLR && can_start && 
+          ((current_millis - previous_millis) >= 1000)) {
+    if (DEBUG) {
+      Serial.println("to yellow from red");
+    }
+    previous_millis = millis();
+    pedestrian_to_red();
+    cycle_time = original_cycle_time; /* go back to normal cycle time, before it was shortened by the pedestrian */
+    transition_to_yellow();
+    button_read = false;
+    can_start = false;
+  }
+  else if (current_color == GREEN_CLR &&
+          ((current_millis - previous_millis) >= (cycle_time - 1000))) {
+    if (DEBUG) {
+      Serial.println("to yellow from green");
+    }
+    previous_millis = millis();
+    cycle_time = original_cycle_time; /* go back to normal cycle time, before it was shortened by the pedestrian */
+    transition_to_yellow();
+    button_read = false;
+  }
+  /* if the time passed is bigger than one second, yellow time is up */
+  else if (current_color == YELLOW_CLR &&
+     ((current_millis - previous_millis) >= 1000)) {
+    previous_millis = millis();
+    if (previous_color == RED_CLR) {
+      transition_yellow_to_green();
+      if (DEBUG) {
+        Serial.println("to green");
+      }
+    }
+    else if (previous_color == GREEN_CLR) {
+      transition_yellow_to_red();
+      pedestrian_to_green();
+      if (DEBUG) {
+        Serial.println("to red");
+      }
+    }
   }
 }
 
@@ -387,23 +383,12 @@ void transition_to_yellow() {
   if (DEBUG) {
     Serial.println("Staying yellow");
   }
-  led_working();
+  leds_working(); /* check if the led is working */
   digitalWrite(YELLOW_LED, HIGH);
   digitalWrite(RED_LED, LOW);
   digitalWrite(GREEN_LED, LOW);
 
-  current_color = YELLOW_CLR;
-}
-
-void transition_red_to_yellow() {
-  if (DEBUG) {
-    Serial.println("Transition from red to yellow");
-  }
-  led_working();
-  digitalWrite(GREEN_LED, LOW); /* just to make sure */
-  digitalWrite(RED_LED, LOW);
-  digitalWrite(YELLOW_LED, HIGH);
-
+  previous_color = current_color;
   current_color = YELLOW_CLR;
 }
 
@@ -411,12 +396,12 @@ void transition_yellow_to_green() {
   if (DEBUG) {
     Serial.println("Transition from yellow to green");
   }
-  led_working();
+  leds_working(); /* check if the led is working */
   digitalWrite(RED_LED, LOW); /* just to make sure */
   digitalWrite(YELLOW_LED, LOW);
   digitalWrite(GREEN_LED, HIGH);
-  previous_color = GREEN_CLR; /* so that we know where to start when
-                                 we receive a start cycle message */
+  
+  previous_color = current_color;
   current_color = GREEN_CLR;
 }
 
@@ -424,11 +409,13 @@ void transition_green_to_yellow() {
   if (DEBUG) {
     Serial.println("Transition from green to yellow");
   }
-  led_working();
+  
+  leds_working(); /* check if the led is working */
   digitalWrite(RED_LED, LOW); /* just to make sure */
   digitalWrite(GREEN_LED, LOW);
   digitalWrite(YELLOW_LED, HIGH);
-
+  
+  previous_color = current_color;
   current_color = YELLOW_CLR;
 }
 
@@ -436,15 +423,19 @@ void transition_yellow_to_red() {
   if (DEBUG) {
     Serial.println("Transition from yellow to red");
   }
-  led_working();
   digitalWrite(GREEN_LED, LOW); /* just to make sure */
   digitalWrite(YELLOW_LED, LOW);
   digitalWrite(RED_LED, HIGH);
-  led_working();
+  
+  leds_working(); /* check if the led is working before sending the info to the controller*/
   send_red();
-  previous_color = RED_CLR; /* so that we know where to start when
-                                 we receive a start cycle message */
+  previous_color = current_color;
   current_color = RED_CLR;
+}
+
+void pedestrian_turn_off() {
+  digitalWrite(PED_RED_LED, LOW);
+  digitalWrite(PED_GREEN_LED, LOW);
 }
 
 void pedestrian_to_green() {
@@ -502,6 +493,68 @@ void printByteArrayAsString(byte * data) {
     Serial.println();
   }
 }
+
+/* FUNCTIONS TO SEND MESSAGES TO THE CONTROLLER */
+
+void send_ping() {
+  make_ping_msg();
+  Wire.beginTransmission(MASTER_ADDRESS);
+  Wire.write(data_out, MAX_BUFFER);
+  Wire.endTransmission();
+  waiting_responses++;
+  
+  if (DEBUG) {
+    Serial.println("Ping sent");
+  }
+}
+
+/* 
+ *  send_ack_request is called when the slave
+ *  receives a request for an ack, it doesn't 
+ *  specify where it is going to
+ */
+void send_ack_request() {
+  make_ack_msg();
+  Wire.write(data_out, MAX_BUFFER);
+
+  if (DEBUG) {
+    Serial.println("Ack sent");
+  }
+}
+
+/* 
+ *  send_ack is called when the slave receives
+ *  a command from the master. it simply answers,
+ *  specifying where it is going to
+ */
+void send_ack() {
+  make_ack_msg();
+  Wire.beginTransmission(MASTER_ADDRESS);
+  Wire.write(data_out, MAX_BUFFER);
+  Wire.endTransmission();
+
+  if (DEBUG) {
+    Serial.println("Ack sent");
+  }
+}
+
+void send_red() {
+  /* we can't send a message if the red led
+     is not working */
+  if (!red_working) {
+    return;
+  }
+  make_red_msg();
+  Wire.beginTransmission(MASTER_ADDRESS);
+  Wire.write(data_out, MAX_BUFFER);
+  Wire.endTransmission();
+  waiting_responses++;
+
+  if (DEBUG) {
+    Serial.println("Red sent");
+  }
+}
+
 
 /* READING FROM THE WIRE */
 
@@ -586,6 +639,8 @@ void read_on(int i) {
   int clr = data_in[i + 3];
 
   turn_traffic_light_on(clr);
+  controller_alive = true,
+  send_ack();
 }
 
 void read_off(int i) {
@@ -610,6 +665,8 @@ void read_off(int i) {
   }
 
   turn_traffic_light_off();
+  send_ack();
+  controller_alive = true;
 }
 
 void read_ping(int i) {
@@ -643,8 +700,9 @@ void read_ping(int i) {
     return;
   }
 
-  /* we've reached the end, it's a ping command */
-  ping();
+  /* we've reached the end, it's a ping command so we reply with an ack */
+  send_ack();
+  controller_alive = true;
 }
 
 void read_ack(int i) {
@@ -671,8 +729,10 @@ void read_ack(int i) {
     return;
   }
 
-  /* we've reached the end, it's an ack command */
-  ack();
+  /* we've reached the end, it's an ack command so we know the controller is alive */
+  controller_alive = true;
+  missed_cycles = 0;
+  waiting_responses--;
 }
 
 void read_time(int i) {
@@ -714,6 +774,8 @@ void read_time(int i) {
 
   /* we've reached the end, it's a time command */
   cycle_time_reset(new_time);
+  send_ack();
+  controller_alive = true;
 }
 
 int map_time(byte value) {
@@ -746,5 +808,7 @@ void read_grn(int i) {
 
   /* we've reached the end, it's an ack command */
   start_cycle();
+  send_ack();
+  controller_alive = true;
 }
 
