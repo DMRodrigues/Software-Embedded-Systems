@@ -1,6 +1,6 @@
 #include <Wire.h>
 
-#define DEBUG 1
+#define DEBUG 0
 
 #define GREEN_LED 2 /* on state */
 #define RED_LED   3 /* off state */
@@ -8,7 +8,7 @@
 #define BUTTON_SW 5
 
 #define NUM_FAILS 2
-#define IGNORE_FAILS 1 /* disable the auto-shutdow when TL dead */
+#define IGNORE_FAILS 0 /* disable the auto-shutdow when TL dead */
 
 #define GREEN  1
 #define YELLOW 2
@@ -45,8 +45,8 @@ byte buff_ping[MAX_BUFFER]; /* buffer to be used with ping commands */
 
 boolean do_internal;
 int controller_state = 0; /* 0-OFF, 1-ON */
-unsigned long previousCycle;
 int lastButtonState = HIGH;
+unsigned long previousCycle;
 
 #define POT_ERROR 3
 const int potPin = A0;
@@ -94,10 +94,10 @@ void loop() {
         Serial.println("Controller Off");
 
       make_off_msg();
-      send_data(TL1_ADDR, -1);
+      send_data(TL1_ADDR, 0);
       if (DEBUG)
         Serial.print("\t");
-      send_data(TL2_ADDR, -1);
+      send_data(TL2_ADDR, 0);
 
       digitalWrite(RED_LED, HIGH);
       digitalWrite(GREEN_LED, LOW);
@@ -116,8 +116,6 @@ void loop() {
 
       digitalWrite(RED_LED, LOW);
       digitalWrite(GREEN_LED, HIGH);
-
-      execute_pot();
 
       make_on_msg(RED); /* send red to one */
       send_data(TL1_ADDR, &wait_tl1);
@@ -158,12 +156,12 @@ void clean_routine() {
   val_sent = false;
   previousCycle = millis();
   potPrevious = previousCycle;
+  memset(ping_res, 0, TL_SIZE);
   memset(data_out, 0, MAX_BUFFER);
   memset(data_in1, 0, MAX_BUFFER);
   memset(data_in2, 0, MAX_BUFFER);
   memset(data_in3, 0, MAX_BUFFER);
   memset(buff_ping, 0, MAX_BUFFER);
-  memset(ping_res, 0, TL_SIZE);
 }
 
 
@@ -178,10 +176,8 @@ void check_button() {
     while (digitalRead(BUTTON_SW) != HIGH) {
       delay(20);  // until released
     }
-    if (DEBUG) {
-      Serial.print("check_button: ");
-      Serial.println(controller_state);
-    }
+    if (DEBUG)
+      Serial.print("check_button");
   }
 }
 
@@ -240,14 +236,14 @@ void send_data(int slave_add, int* to_inc) {
     Serial.print("Return call: ");
     Serial.println(err);
   }
-  if ( (*to_inc) != -1)
+  if (to_inc != 0)
     (*to_inc)++;
 
   digitalWrite(BUS_LED, LOW);
   delay(30); // to process request
 }
 
-/* DO NOT USE */
+/* DO NOT USE                                                                             */
 void broadcast_data() {
   digitalWrite(BUS_LED, HIGH);
   Wire.beginTransmission(0);  // broadcast to all
@@ -262,6 +258,7 @@ void broadcast_data() {
   delay(30); // to process request
 }
 
+/* make synchronous ping, beware of time requests                                         */
 void make_ping(int slave_add) {
   int i = 0, res_id = -1, j;
   if (DEBUG)
@@ -364,6 +361,7 @@ void map_tl_ping(int sa, int rid) {
 /* -------------------------------------------------------------------------------------- */
 /* routine executed when every cycle is done to verify if ACK is missing or not           */
 /* if ACK is missing then perform ping to make sure is dead or alive                      */
+/* to be called int he end of a cycle, last function in main loop                         */
 void check_cycles() {
   unsigned long currentMillis = millis();
 
@@ -380,12 +378,14 @@ void check_cycles() {
         Serial.print("TL1 | ");
       make_ping(TL1_ADDR);
     }
+    wait_tl1++; // just to force the ping
 
     if (wait_tl2 > 0) {
       if (DEBUG)
         Serial.print("TL2 | ");
       make_ping(TL2_ADDR);
     }
+    wait_tl2++; // just to force the ping
 
     if (DEBUG)
       Serial.println("====================================");
@@ -452,7 +452,7 @@ void verify_command(byte * s, int s_size) {
       id = extract_ping_id(s, i);
       if (id != -1) {
         make_ack_msg();
-        send_data(id, -1); // dont care for ack
+        send_data(id, 0); // dont care for ack
       }
       else {
         // bad PING request
@@ -480,12 +480,12 @@ void verify_command(byte * s, int s_size) {
         if (id == TL1_ADDR) {
           send_data(TL2_ADDR, &wait_tl2);
           make_ack_msg();
-          send_data(TL1_ADDR, -1);
+          send_data(TL1_ADDR, 0);
         }
         else if (id == TL2_ADDR) {
           send_data(TL1_ADDR, &wait_tl1);
           make_ack_msg();
-          send_data(TL2_ADDR, -1);
+          send_data(TL2_ADDR, 0);
         }
         else {
           // bad TL to answer
