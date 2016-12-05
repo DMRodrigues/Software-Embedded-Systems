@@ -31,16 +31,17 @@
 byte data_out[MAX_BUFFER]; /* buffer to send data to master */
 byte data_in[MAX_BUFFER]; /* buffer to receive data from master */
 
-unsigned long cycle_time;
-unsigned long original_cycle_time;
+unsigned long cycle_time; /* to check if the controller is alive during a cycle */
+unsigned long original_cycle_time; /* original time, without shortening because of the pedestrians */
 unsigned long previous_millis;
 unsigned long previous_cycle;
 
-int previous_color;
+int previous_color; /* to keep track of the colors of the traffic light */
 int current_color;
 
-int missed_cycles;
+int missed_cycles; /* how many cycles did the controller miss? */
 int waiting_responses; /* how many responses we are waiting from the controller */
+boolean sent_ping; /* are we expecting a ping from the controller? */
 
 boolean blinking;
 boolean is_yellow; /* when blinking, is the led yellow or not? */
@@ -78,6 +79,7 @@ void setup() {
 
   missed_cycles = 0;
   waiting_responses = 0;
+  sent_ping = false;
 
   blinking = true;
   is_yellow = true;
@@ -251,19 +253,32 @@ void leds_working() {
 }
 
 void check_controller() {
-  if (DEBUG) {
-    Serial.print("Missed cycles: ");
-    Serial.println(missed_cycles);
-    Serial.print("Waiting responses: ");
-    Serial.println(waiting_responses);
+  if (!controller_alive) {
+    return;
   }
+  
   unsigned long current_millis = millis();
 
   if ((current_millis - previous_cycle) >= cycle_time) {
-    if (waiting_responses > 0) {
+    if (sent_ping) {
+      if (missed_cycles == 2) {
+        controller_alive = false;
+        blinking = true;
+        if (DEBUG) {
+          Serial.println("Controller died");
+        }
+        sent_ping = false;
+        missed_cycles = 0;
+      }
+    }
+    else {
       send_ping();
+      sent_ping = true;
     }
     previous_cycle = millis();
+    if (sent_ping) {
+      missed_cycles++;
+    }
   }
 }
 
@@ -731,6 +746,7 @@ void read_ack(int i) {
 
   /* we've reached the end, it's an ack command so we know the controller is alive */
   controller_alive = true;
+  sent_ping = false;
   missed_cycles = 0;
   waiting_responses--;
 }
@@ -776,6 +792,7 @@ void read_time(int i) {
   cycle_time_reset(new_time);
   send_ack();
   controller_alive = true;
+  missed_cycles = 0;
 }
 
 int map_time(byte value) {
@@ -810,5 +827,6 @@ void read_grn(int i) {
   start_cycle();
   send_ack();
   controller_alive = true;
+  missed_cycles = 0;
 }
 
