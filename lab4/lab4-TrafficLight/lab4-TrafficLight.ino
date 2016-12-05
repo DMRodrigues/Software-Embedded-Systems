@@ -26,6 +26,8 @@
 #define MIN_TIME 4000
 #define MAX_TIME 10000
 
+#define MAX_CYCLES 2 /* number of cycles the controller can spend without answering */
+
 #define MAX_BUFFER 8
 
 byte data_out[MAX_BUFFER]; /* buffer to send data to master */
@@ -102,11 +104,9 @@ void setup() {
 
 void loop() {
   
-  leds_working(); /* check if the leds are working */
-
   watch_the_cycle(); /* do the normal functioning of a traffic light */
 
-  check_controller(); /* check if the controller is alive */
+  // check_controller(); /* check if the controller is alive */
 
   /* check if anybody clicked the button during the green
      if nobody has yet clicked */
@@ -218,9 +218,21 @@ void cycle_time_reset(int new_time) {
 
 /* CHECK STATE FUNCTIONS */
 
-void leds_working() {
+void check_yellow_led() {
   /* if the voltage coming from a led is high, 
-   *  then we know it's not working */
+     then we know it's not working */
+  if (digitalRead(YELLOW_IN) == HIGH) {
+    yellow_working = false;
+    if (DEBUG) {
+      Serial.println("yellow not working");
+    }
+  }
+  else {
+    yellow_working = true;
+  }
+}
+
+void check_green_led() {
   if (digitalRead(GREEN_IN) == HIGH) {
     green_working = false;
     blinking = true;
@@ -231,6 +243,9 @@ void leds_working() {
   else {
     green_working = true;
   }
+}
+
+void check_red_led() {
   if (digitalRead(RED_IN) == HIGH) {
     red_working = false;
     blinking = true;
@@ -240,15 +255,6 @@ void leds_working() {
   }
   else {
     red_working = true;
-  }
-  if (digitalRead(YELLOW_IN) == HIGH) {
-    yellow_working = false;
-    if (DEBUG) {
-      Serial.println("yellow not working");
-    }
-  }
-  else {
-    yellow_working = true;
   }
 }
 
@@ -261,14 +267,14 @@ void check_controller() {
 
   if ((current_millis - previous_cycle) >= cycle_time) {
     if (sent_ping) {
-      if (missed_cycles == 2) {
+      if (missed_cycles == MAX_CYCLES) {
         controller_alive = false;
         blinking = true;
+        sent_ping = false;
+        missed_cycles = 0;
         if (DEBUG) {
           Serial.println("Controller died");
         }
-        sent_ping = false;
-        missed_cycles = 0;
       }
     }
     else {
@@ -389,6 +395,7 @@ void blink_yellow() {
     }
     else {
       digitalWrite(YELLOW_LED, HIGH);
+      check_yellow_led();
       is_yellow = true;
     }
   }
@@ -396,12 +403,15 @@ void blink_yellow() {
 
 void transition_to_yellow() {
   if (DEBUG) {
-    Serial.println("Staying yellow");
+    Serial.println("To yellow");
   }
-  leds_working(); /* check if the led is working */
+  
   digitalWrite(YELLOW_LED, HIGH);
   digitalWrite(RED_LED, LOW);
   digitalWrite(GREEN_LED, LOW);
+
+  check_yellow_led(); /* check if the led is working */ 
+  /* the traffic light can still work without it */
 
   previous_color = current_color;
   current_color = YELLOW_CLR;
@@ -409,41 +419,33 @@ void transition_to_yellow() {
 
 void transition_yellow_to_green() {
   if (DEBUG) {
-    Serial.println("Transition from yellow to green");
+    Serial.println("To green");
   }
-  leds_working(); /* check if the led is working */
+  
   digitalWrite(RED_LED, LOW); /* just to make sure */
   digitalWrite(YELLOW_LED, LOW);
   digitalWrite(GREEN_LED, HIGH);
+
+  check_green_led(); /* check if the led is working */ 
   
   previous_color = current_color;
   current_color = GREEN_CLR;
 }
 
-void transition_green_to_yellow() {
-  if (DEBUG) {
-    Serial.println("Transition from green to yellow");
-  }
-  
-  leds_working(); /* check if the led is working */
-  digitalWrite(RED_LED, LOW); /* just to make sure */
-  digitalWrite(GREEN_LED, LOW);
-  digitalWrite(YELLOW_LED, HIGH);
-  
-  previous_color = current_color;
-  current_color = YELLOW_CLR;
-}
-
 void transition_yellow_to_red() {
   if (DEBUG) {
-    Serial.println("Transition from yellow to red");
+    Serial.println("To red");
   }
   digitalWrite(GREEN_LED, LOW); /* just to make sure */
   digitalWrite(YELLOW_LED, LOW);
   digitalWrite(RED_LED, HIGH);
   
-  leds_working(); /* check if the led is working before sending the info to the controller*/
-  send_red();
+  check_red_led(); /* check if the led is working */   
+  
+  if (red_working) {
+    send_red();
+  }
+
   previous_color = current_color;
   current_color = RED_CLR;
 }
