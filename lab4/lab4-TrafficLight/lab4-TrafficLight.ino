@@ -113,13 +113,6 @@ void loop() {
   if (!button_read && current_color == GREEN_CLR) {
     check_button();
   }
-  
-  /* if it's blinking or the controller is dead,
-     the traffic light should start blinking */
-  if (blinking || !controller_alive) {
-    blink_yellow();
-    pedestrian_turn_off(); /* just to make sure these don't light up */
-  }
 
   /* check if we received anything */
   if (event_waiting) {
@@ -131,12 +124,6 @@ void loop() {
   if (pedestrian) {
     pedestrian = false;
     shorten_cycle();
-  }
-
-  /* if we received a ON YELLOW, we just stay yellow */
-  if (stay_yellow) {
-    transition_to_yellow();
-    pedestrian_turn_off(); /* just to make sure these don't light up */
   }
 }
 
@@ -321,10 +308,19 @@ void shorten_cycle()
 /* TRAFFIC LIGHT NORMAL FUNCTIONING */
 
 void watch_the_cycle() {
-  /* if the traffic light is in the blinking state
-   *  then we don't have to do anything else and if
-   *  it is indefinitely yellow the same happens */
-  if (blinking || stay_yellow) {
+  /* if the controller is dead or the traffic light is blinking,
+   *  we just blink and return, no need for anything else */
+  if (blinking || !controller_alive) {
+    blink_yellow(); 
+    pedestrian_turn_off(); /* just to make sure these don't light up */
+    return;
+  }
+  
+  /* if the traffic light receives an ON YELLOW, we just
+   *  transition to yellow and return */
+  if (stay_yellow) {
+    transition_to_yellow(); /* we just stay yellow */
+    pedestrian_turn_off(); /* just to make sure these don't light up */
     return;
   }
 
