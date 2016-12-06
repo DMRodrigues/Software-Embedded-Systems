@@ -1,6 +1,6 @@
 #include <Wire.h>
 
-#define DEBUG 1
+#define DEBUG 0
 
 #define TRAFFIC_LIGHT_ID 9
 
