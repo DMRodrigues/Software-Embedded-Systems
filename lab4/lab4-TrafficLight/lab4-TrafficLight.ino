@@ -106,7 +106,7 @@ void loop() {
   
   watch_the_cycle(); /* do the normal functioning of a traffic light */
 
-  // check_controller(); /* check if the controller is alive */
+  check_controller(); /* check if the controller is alive */
 
   /* check if anybody clicked the button during the green
      if nobody has yet clicked */
