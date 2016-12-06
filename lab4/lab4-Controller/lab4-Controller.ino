@@ -1,6 +1,6 @@
 #include <Wire.h>
 
-#define DEBUG 0
+#define DEBUG 1
 
 #define GREEN_LED 2 /* on state */
 #define RED_LED   3 /* off state */
@@ -8,14 +8,13 @@
 #define BUTTON_SW 5 /* input switch to turn on/off controller */
 
 #define NUM_FAILS 2 /* the max of tolerated failures */
-#define IGNORE_FAILS 0 /* disable the auto-shutdow when TL dead */
+#define IGNORE_FAILS 0 /* disable the auto-shutdow when any TL dies */
 
 #define GREEN  1
 #define YELLOW 2
 #define RED    3
 
 #define MY_ADDR  8 /* controller/master address */
-#define TL_SIZE  2 /* we have two traffic lights */
 #define TL1_ADDR 9
 #define TL2_ADDR 10
 
@@ -39,6 +38,7 @@ int in3_flag;
 int in3_howMany;
 byte data_in3[MAX_BUFFER]; /* buffer to receive data from slaves */
 
+#define TL_SIZE 2 /* we have two traffic lights */
 int wait_tl1; /* know how many commands sent to TL1 */
 int wait_tl2; /* know how many commands sent to TL2 */
 byte ping_res[TL_SIZE]; /* count cycles of TLs is nok, to perform shutdown */
@@ -47,6 +47,7 @@ boolean do_internal; /* to perform only once per state changed */
 int controller_state = 0; /* 0-OFF, 1-ON */
 int lastButtonState = HIGH;
 unsigned long previousCycle;
+unsigned int nr_cycles; /* just to be cool whatever */
 
 #define POT_ERROR 3
 const int potPin = A0;
@@ -64,7 +65,7 @@ void setup() {
     Serial.begin(115200);
 
   Wire.begin(MY_ADDR);
-  Wire.onReceive(proccess_receive);
+  Wire.onReceive(proccess_receive); /* apparently MASTER can register callback */
 
   /* init leds and buton */
   pinMode(RED_LED, OUTPUT);
@@ -75,9 +76,8 @@ void setup() {
   digitalWrite(BUS_LED, LOW);
   pinMode(BUTTON_SW, INPUT_PULLUP);
 
-  do_internal = false; /* no need, setup() does it */
-
   clean_routine(); /* code reuse and stuff */
+  do_internal = false; /* no need, setup() does it, just up here */
 
   if (DEBUG)
     Serial.println("Will start loop");
@@ -155,6 +155,7 @@ void clean_routine() {
   in3_flag = 0;
   wait_tl1 = 0;
   wait_tl2 = 0;
+  nr_cycles = 0;
   last_pot = -1;
   pot_val = 4000;
   in1_howMany = 0;
@@ -185,7 +186,7 @@ void check_button() {
       delay(20);  /* until released, not efficient... */
     }
     if (DEBUG)
-      Serial.print("check_button");
+      Serial.println("check_button");
   }
 }
 
@@ -218,7 +219,7 @@ void execute_pot() {
     if (DEBUG)
       Serial.print("\t\t");
     send_data(TL2_ADDR, &wait_tl2);
-    delay(10); /* to process */
+
     val_sent = true; /* value sent */
 
     if (DEBUG)
@@ -272,7 +273,7 @@ void broadcast_data() {
 /* -------------------------------------------------------------------------------------- */
 /* make synchronous ping, beware of time requests                                         */
 void make_ping(int slave_add) {
-  int i = 0, res_id = -1, j;
+  int j, i = 0, res_id = -1;
   if (DEBUG)
     Serial.println("Requesting ping");
 
@@ -289,11 +290,13 @@ void make_ping(int slave_add) {
   }
 
   for (j = 0; j < i; j++) {
-    if (buff_ping[j] == 'A')
+    if (buff_ping[j] == 'A') {
       res_id = extract_ack_id(buff_ping, j); /* see valid ACK answer */
+      break;
+    }
   }
 
-  map_tl_ping(slave_add, res_id); /* update the wait var, and verify cycles */
+  map_tl_ping(slave_add, res_id); /* update the wait_tl var, and verify cycles */
 
   memset(buff_ping, 0, MAX_BUFFER);
   if (DEBUG) {
@@ -324,6 +327,8 @@ void proccess_receive(int i) {
 
   } else {
     // ERROR
+    if (DEBUG)
+      Serial.println("All Buffers FULL");
     // add more buffers to prevent data loss
   }
   digitalWrite(BUS_LED, LOW);
@@ -405,7 +410,7 @@ void check_cycles() {
     if (DEBUG)
       Serial.println("====================================");
 
-    /* if any TL is dead for 2 cycles then begin shutdown */
+    /* test if any TL is dead for 2 cycles then begin shutdown */
     if (!IGNORE_FAILS) { /* in case we have only one TL for testing */
       if ((ping_res[0] >= NUM_FAILS) || (ping_res[1] >= NUM_FAILS)) {
         if (DEBUG)
@@ -413,6 +418,8 @@ void check_cycles() {
         set_off();
       }
     }
+
+    nr_cycles++; // just inc, not really used
   }
 }
 
@@ -457,16 +464,16 @@ void do_verify_data() {
 
 /* -------------------------------------------------------------------------------------- */
 /* to get the type of command received and reply accordingly                              */
+/* verify what type of command received:                                                  */
+/*    PING x -> send ACK                                                                  */
+/*    ACK x  -> late ACK received, process it                                             */
+/*    RED x  -> adapt, send yellow to other TL                                            */
 void verify_command(byte * s, int s_size) {
   if (DEBUG)
     Serial.print("verify_command | ");
-  int id;
-  /* verify what type of command received:
-    PING x -> send ACK
-    ACK x  -> late ACK received, process it
-    RED x  -> adapt, send yellow to other TL
-  */
-  for (int i = 0; i < s_size; i++) {
+  int i, id;
+
+  for (i = 0; i < s_size; i++) {
     if (s[i] == 'P') {
       if (DEBUG)
         Serial.print("PING | ");
@@ -482,38 +489,33 @@ void verify_command(byte * s, int s_size) {
     }
     else if (s[i] == 'A') {
       id = extract_ack_id(s, i);
-      if (id != -1) {
-        if (DEBUG)
-          Serial.print("ACK | ");
-        map_tl_ping(id, id);
-      }
-      else {
-        // bad ACK received
-      }
+      if (DEBUG)
+        Serial.print("ACK | ");
+      map_tl_ping(id, id); /* dont care for aswner in case -1, the map is done */
       break;
     }
     else if (s[i] == 'R') {
       id = extract_red_id(s, i);
-      if (id != -1) {
-        if (DEBUG)
-          Serial.print("RED | ");
-        make_grn_msg(); /* send grn to the other TL, and ack to sender */
-        if (id == TL1_ADDR) {
+      if (DEBUG)
+        Serial.print("RED | ");
+      switch (id) {
+        case TL1_ADDR:
+          make_grn_msg(); /* send grn to the other TL, and ack to sender */
           send_data(TL2_ADDR, &wait_tl2);
           make_ack_msg();
           send_data(TL1_ADDR, 0); // dont care for ack
-        }
-        else if (id == TL2_ADDR) {
+          break;
+        case TL2_ADDR:
+          make_grn_msg(); /* send grn to the other TL, and ack to sender */
           send_data(TL1_ADDR, &wait_tl1);
           make_ack_msg();
           send_data(TL2_ADDR, 0); // dont care for ack
-        }
-        else {
-          // bad TL to answer
-        }
-      }
-      else {
-        // bad RED received, shutdown?
+          break;
+        default:
+          if (DEBUG)
+            Serial.println("WRONG");
+          // bad RED received, shutdown?
+          break;
       }
       break;
     }
@@ -524,17 +526,14 @@ void verify_command(byte * s, int s_size) {
   }
 }
 
-
 /* -------------------------------------------------------------------------------------- */
 /* auxiliary function to extract the id (address) in buffer with ping msg                 */
+/* [PING x] has 6 letters, buffer has space for MAX_BUFFER(8).                            */
+/* If it starts on i > 2, then we won't be able to extract a ping command from the buffer */
 int extract_ping_id(byte * s, int i) {
   if (DEBUG)
     Serial.print("extract_ping_id: ");
-  /*
-    [PING x] has 6 letters, buffer has space for 8. if
-    it starts on i > 2, then we won't be able to
-    extract a ping command from the buffer
-  */
+
   if (i > 2)
     return -1;
 
@@ -554,14 +553,12 @@ int extract_ping_id(byte * s, int i) {
 
 /* -------------------------------------------------------------------------------------- */
 /* auxiliary function to extract the id (address) in buffer with ack msg                  */
+/* [ACK x] has 5 letters, buffer has space for MAX_BUFFER(8).                             */
+/* If it starts on i > 3, then we won't be able to extract an ack command from the buffer */
 int extract_ack_id(byte * s, int i) {
   if (DEBUG)
     Serial.print("extract_ack_id: ");
-  /*
-    [ACK x] has 5 letters, buffer has space for 8. if
-    it starts on i > 3, then we won't be able to
-    extract an ack command from the buffer
-  */
+
   if (i > 3)
     return -1;
 
@@ -579,14 +576,12 @@ int extract_ack_id(byte * s, int i) {
 
 /* -------------------------------------------------------------------------------------- */
 /* auxiliary function to extract the id (address) in buffer with red msg                  */
+/* [RED x] has 5 letters, buffer has space for MAX_BUFFER(8).                             */
+/* If it starts on i > 3, then we won't be able to extract an red command from the buffer */
 int extract_red_id(byte * s, int i) {
   if (DEBUG)
     Serial.print("extract_red_id: ");
-  /*
-    [RED x] has 5 letters, buffer has space for 8. if
-    it starts on i > 3, then we won't be able to
-    extract an red command from the buffer
-  */
+
   if (i > 3)
     return -1;
 
@@ -605,7 +600,7 @@ int extract_red_id(byte * s, int i) {
 
 /******************************************************************************************/
 /* -------------------------------------------------------------------------------------- */
-/* message creation area down here with API interface                                     */
+/* message creation area down here accordingly to the API interface                       */
 void make_on_msg(int id) {
   memset(data_out, 0, MAX_BUFFER);
   data_out[0] = 'O';
@@ -690,6 +685,18 @@ void printByteArrayAsStringln(byte * data) {
       Serial.print(" | ");
     }
     Serial.println();
+  }
+}
+
+
+/******************************************************************************************/
+/* -------------------------------------------------------------------------------------- */
+/* to simulate a start comand to a TL, for testing                                        */
+void simulate_grn(int ad, int* p) {
+  if (nr_cycles == 2) {
+    make_grn_msg();
+    send_data(ad, p);
+    nr_cycles = 0;
   }
 }
 
